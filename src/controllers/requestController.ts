@@ -59,6 +59,13 @@ export class RequestController {
         await this.runCore(httpRequest, document);
     }
 
+    @trace('Run All')
+    public async runAll(ranges: Range[]) {
+        for (const range of ranges) {
+            await this.run(range);
+        }
+    }
+
     @trace('Rerun Request')
     public async rerun() {
         if (!this._lastRequest) {
