@@ -1,4 +1,4 @@
-import { ExtensionContext, Range, TextDocument, ViewColumn, window } from 'vscode';
+import { ExtensionContext, Range, TextDocument, TextEditor, ViewColumn, window } from 'vscode';
 import Logger from '../logger';
 import { RestClientSettings } from '../models/configurationSettings';
 import { HistoricalHttpRequest, HttpRequest } from '../models/httpRequest';
@@ -32,6 +32,8 @@ export class RequestController {
 
     @trace('Request')
     public async run(range: Range) {
+        this._webview.clearResponses();
+
         const editor = window.activeTextEditor;
         const document = getCurrentTextDocument();
         if (!editor || !document) {
@@ -56,18 +58,35 @@ export class RequestController {
         // parse http request
         const httpRequest = await RequestParserFactory.createRequestParser(text).parseHttpRequest(name);
 
-        await this.runCore(httpRequest, document);
+        await this.runCore(httpRequest, editor, document);
     }
 
     @trace('Run All')
     public async runAll(ranges: Range[]) {
+        this._webview.clearResponses();
+
+        const editor = window.activeTextEditor;
+        const document = getCurrentTextDocument();
+        if (!editor || !document) {
+            return;
+        }
+
         for (const range of ranges) {
-            await this.run(range);
+            const selectedRequest = await Selector.getRequest(editor, range);
+            if (!selectedRequest) {
+                continue;
+            }
+    
+            const { text, name } = selectedRequest;
+            const httpRequest = await RequestParserFactory.createRequestParser(text).parseHttpRequest(name);
+            await this.runCore(httpRequest, editor, document);
         }
     }
 
     @trace('Rerun Request')
     public async rerun() {
+        this._webview.clearResponses();
+
         if (!this._lastRequest) {
             return;
         }
@@ -82,7 +101,8 @@ export class RequestController {
         this._requestStatusEntry.update({ state: RequestState.Cancelled });
     }
 
-    private async runCore(httpRequest: HttpRequest, document?: TextDocument) {
+    private async runCore(httpRequest: HttpRequest, activeEditor?: TextEditor, document?: TextDocument) {
+
         // clear status bar
         this._requestStatusEntry.update({ state: RequestState.Pending });
 
@@ -105,7 +125,7 @@ export class RequestController {
             }
 
             try {
-                const activeColumn = window.activeTextEditor!.viewColumn;
+                const activeColumn = activeEditor?.viewColumn;
                 const previewColumn = this._restClientSettings.previewColumn === ViewColumn.Active
                     ? activeColumn
                     : ((activeColumn as number) + 1) as ViewColumn;

@@ -22,9 +22,14 @@ type FoldingRange = [number, number];
 
 export class HttpResponseWebview extends BaseWebview {
 
+    //
+    // Collected reponses.
+    //
+    private responses: HttpResponse[] = [];
+
     private readonly urlRegex = /(https?:\/\/[^\s"'<>\]\)\\]+)/gi;
 
-    private readonly panelResponses: Map<WebviewPanel, HttpResponse>;
+    private readonly panelResponses: Map<WebviewPanel, HttpResponse[]>;
 
     private readonly clipboard: Clipboard = env.clipboard;
 
@@ -36,7 +41,7 @@ export class HttpResponseWebview extends BaseWebview {
         return 'httpResponsePreviewFocus';
     }
 
-    private get activeResponse(): HttpResponse | undefined {
+    private get activeResponses(): HttpResponse[] | undefined {
         return this.activePanel ? this.panelResponses.get(this.activePanel) : undefined;
     }
 
@@ -44,7 +49,7 @@ export class HttpResponseWebview extends BaseWebview {
         super(context);
 
         // Init response webview map
-        this.panelResponses = new Map<WebviewPanel, HttpResponse>();
+        this.panelResponses = new Map<WebviewPanel, HttpResponse[]>();
 
         this.context.subscriptions.push(commands.registerCommand('rest-client.fold-response', this.foldResponseBody, this));
         this.context.subscriptions.push(commands.registerCommand('rest-client.unfold-response', this.unfoldResponseBody, this));
@@ -54,7 +59,14 @@ export class HttpResponseWebview extends BaseWebview {
         this.context.subscriptions.push(commands.registerCommand('rest-client.save-response-body', this.saveBody, this));
     }
 
+    public clearResponses() {
+        this.responses = [];
+    }
+
     public async render(response: HttpResponse, column: ViewColumn) {
+
+        this.responses.push(response);
+
         let panel: WebviewPanel;
         if (this.settings.showResponseInDifferentTab || this.panels.length === 0) {
             panel = window.createWebviewPanel(
@@ -94,16 +106,18 @@ export class HttpResponseWebview extends BaseWebview {
             this.panels.push(panel);
         } else {
             panel = this.panels[this.panels.length - 1];
-            panel.title = this.getTitle(response);
+            panel.title = this.responses.length > 1
+                ? `${this.responses.length} responses`
+                : this.getTitle(response);
         }
 
-        panel.webview.html = this.getHtmlForWebview(panel, response);
+        panel.webview.html = this.getHtmlForWebview(panel, this.responses);
 
         this.setPreviewActiveContext(this.settings.previewResponsePanelTakeFocus);
 
         panel.reveal(column, !this.settings.previewResponsePanelTakeFocus);
 
-        this.panelResponses.set(panel, response);
+        this.panelResponses.set(panel, this.responses);
         this.activePanel = panel;
     }
 
@@ -123,15 +137,15 @@ export class HttpResponseWebview extends BaseWebview {
 
     @trace('Copy Response Body')
     private async copyBody() {
-        if (this.activeResponse) {
-            await this.clipboard.writeText(this.activeResponse.body);
+        if (this.activeResponses) {
+            await this.clipboard.writeText(this.activeResponses.map(response => response.body).join("\r\n"));
         }
     }
 
     @trace('Save Response')
     private async save() {
-        if (this.activeResponse) {
-            const fullResponse = this.getFullResponseString(this.activeResponse);
+        if (this.activeResponses) {
+            const fullResponse = this.activeResponses.map(response => this.getFullResponseString(response)).join("\r\n");
             const defaultFilePath = UserDataManager.getResponseSaveFilePath(`Response-${Date.now()}.http`);
             try {
                 await this.openSaveDialog(defaultFilePath, fullResponse);
@@ -143,14 +157,16 @@ export class HttpResponseWebview extends BaseWebview {
 
     @trace('Save Response Body')
     private async saveBody() {
-        if (this.activeResponse) {
-            const extension = MimeUtility.getExtension(this.activeResponse.contentType, this.settings.mimeAndFileExtensionMapping);
-            const fileName = !extension ? `Response-${Date.now()}` : `Response-${Date.now()}.${extension}`;
-            const defaultFilePath = UserDataManager.getResponseBodySaveFilePath(fileName);
-            try {
-                await this.openSaveDialog(defaultFilePath, this.activeResponse.bodyBuffer);
-            } catch {
-                window.showErrorMessage('Failed to save latest response body to disk');
+        if (this.activeResponses) {
+            for (const response of this.activeResponses) {
+                const extension = MimeUtility.getExtension(response.contentType, this.settings.mimeAndFileExtensionMapping);
+                const fileName = !extension ? `Response-${Date.now()}` : `Response-${Date.now()}.${extension}`;
+                const defaultFilePath = UserDataManager.getResponseBodySaveFilePath(fileName);
+                try {
+                    await this.openSaveDialog(defaultFilePath, response.bodyBuffer);
+                } catch {
+                    window.showErrorMessage('Failed to save latest response body to disk');
+                }
             }
         }
     }
@@ -183,19 +199,36 @@ export class HttpResponseWebview extends BaseWebview {
         }
     }
 
-    private getHtmlForWebview(panel: WebviewPanel, response: HttpResponse): string {
-        let innerHtml: string;
+    private getHtmlForWebview(panel: WebviewPanel, responses: HttpResponse[]): string {
+
+        console.log(`Generate html for ${responses.length}`); //fio:
+
+        let innerHtml: string = "";
         let width = 2;
-        let contentType = response.contentType;
-        if (contentType) {
-            contentType = contentType.trim();
-        }
-        if (MimeUtility.isBrowserSupportedImageFormat(contentType) && !HttpResponseWebview.isHeadRequest(response)) {
-            innerHtml = `<img src="data:${contentType};base64,${base64(response.bodyBuffer)}">`;
-        } else {
-            const code = this.highlightResponse(response);
-            width = (code.split(/\r\n|\r|\n/).length + 1).toString().length;
-            innerHtml = `<pre><code>${this.addLineNums(code)}</code></pre>`;
+
+        for (const response of responses) {
+            let contentType = response.contentType;
+            if (contentType) {
+                contentType = contentType.trim();
+            }
+            let html: string;
+            if (MimeUtility.isBrowserSupportedImageFormat(contentType) && !HttpResponseWebview.isHeadRequest(response)) {
+                html = `<img src="data:${contentType};base64,${base64(response.bodyBuffer)}">`;
+            } else {
+                const code = this.highlightResponse(response);
+                width = (code.split(/\r\n|\r|\n/).length + 1).toString().length;
+                html = `<pre><code>${this.addLineNums(code)}</code></pre>`;
+            }
+
+            if (this.settings.disableAddingHrefLinkForLargeResponse && response.bodySizeInBytes > this.settings.largeResponseBodySizeLimitInMB * 1024 * 1024) {
+                // Don't do anything.
+            }
+            else {
+                // Linkify.
+                html = this.addUrlLinks(html)
+            }
+
+            innerHtml += html;
         }
 
         // Content Security Policy
@@ -217,9 +250,7 @@ export class HttpResponseWebview extends BaseWebview {
     </head>
     <body>
         <div>
-            ${this.settings.disableAddingHrefLinkForLargeResponse && response.bodySizeInBytes > this.settings.largeResponseBodySizeLimitInMB * 1024 * 1024
-                ? innerHtml
-                : this.addUrlLinks(innerHtml)}
+            ${innerHtml}
             <a id="scroll-to-top" role="button" aria-label="scroll to top" title="Scroll To Top"><span class="icon"></span></a>
         </div>
         <script type="text/javascript" src="${panel.webview.asWebviewUri(this.scriptFilePath)}" nonce="${nonce}" charset="UTF-8"></script>
